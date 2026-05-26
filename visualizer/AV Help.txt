@@ -1,0 +1,107 @@
+================================================================================
+  AUDIO VISUALIZER -- HELP
+================================================================================
+
+A GPU-rendered circular audio visualizer (ModernGL + GLFW). Reacts to either
+system audio loopback or a specific audio file decoded through ffmpeg and
+played out via sounddevice.
+
+--------------------------------------------------------------------------------
+  COMMAND-LINE FLAGS
+--------------------------------------------------------------------------------
+
+Window / display
+  --width <px>             Window width  (default 1280)
+  --height <px>            Window height (default 720)
+  --fullscreen             Start fullscreen on the primary monitor
+  --rotation <deg>         Initial waveform rotation in degrees (default 90)
+
+Audio source -- loopback / microphone
+  --loopback               Capture system audio output (what you hear).
+                           Uses native WASAPI loopback on Windows;
+                           PulseAudio monitor sources on Linux.
+  --device <N>             Pick a capture device by index
+  --device-name <STR>      Pick a capture device by name substring match
+  --list-devices           Print every capture device and exit
+
+Audio source -- file mode (this is what Drop uses)
+  --file <PATH>            Play this audio file directly via ffmpeg +
+                           sounddevice instead of capturing loopback.
+                           Format support = whatever ffmpeg supports
+                           (mp3, m4a, wav, flac, ogg, ...).
+  --ffmpeg-path <PATH>     Path to ffmpeg.exe for --file decoding.
+                           Defaults to ffmpeg on PATH.
+  --start <SEC>            Start playback this many seconds into the file.
+  --status-file <PATH>     Write current playback position (one float,
+                           seconds) to this file every ~250ms. Drop reads
+                           this on viz close to seek itself in sync.
+
+--------------------------------------------------------------------------------
+  RUNTIME CONTROLS (inside the visualizer window)
+--------------------------------------------------------------------------------
+
+  ESC                 Quit
+  [    ]              Rotate waveform -15 deg / +15 deg
+  R                   Reset rotation to the --rotation value
+  H                   Toggle the on-screen shortcuts overlay (default ON)
+
+  Effect toggles:
+  1                   Bloom (glow post-pass)
+  2                   Camera shake on bass hits
+  3                   Particle bursts on bass hits
+  4                   Chromatic aberration
+  5                   Background star drift (slow inward motion)
+  6                   Star twinkle / flicker     (default OFF)
+  7                   Background vignette
+
+--------------------------------------------------------------------------------
+  EXAMPLE USAGE
+--------------------------------------------------------------------------------
+
+  Default microphone:
+      python main.py
+
+  Capture system audio (Windows / Linux):
+      python main.py --loopback
+
+  Pick a specific capture device:
+      python main.py --list-devices
+      python main.py --device 5
+
+  Play a file directly (the Drop-launch path):
+      python main.py --file song.mp3 --start 45.2
+
+  Fullscreen at native resolution:
+      python main.py --fullscreen
+
+  Custom resolution:
+      python main.py --width 1920 --height 1080
+
+--------------------------------------------------------------------------------
+  BUILD (PyInstaller -- single EXE)
+--------------------------------------------------------------------------------
+
+From the visualizer/ directory:
+
+    pyinstaller --onefile --windowed --name visualizer ^
+        --icon ../drop.ico ^
+        --add-data "shaders;shaders" ^
+        --collect-binaries soundcard ^
+        --collect-binaries sounddevice ^
+        main.py
+
+Then drop dist\visualizer.exe next to Drop.exe -- Drop's launcher finds
+it automatically when frozen.
+
+Key flag rationale:
+  --windowed               No console subsystem. Closing the GLFW window
+                           closes the entire process cleanly -- no terminal
+                           flashes on launch, none hangs around at exit.
+  --add-data shaders;...   Bundle the GLSL shader files alongside the EXE.
+                           Without this the renderer can't load shaders/.
+  --collect-binaries       Pull in the native DLLs that soundcard (WASAPI)
+                           and sounddevice (PortAudio) need at runtime.
+
+================================================================================
+  github.com/tagratie
+================================================================================

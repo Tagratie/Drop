@@ -1,0 +1,112 @@
+================================================================================
+  DROP -- HELP
+================================================================================
+
+TikTok-style media downloader, organizer, and player for Windows. Pulls
+audio and video via yt-dlp, organizes downloads into Edits / Songs
+libraries, plays them in a vertical feed, and launches a GPU-rendered
+audio visualizer for audio-only playback.
+
+--------------------------------------------------------------------------------
+  KEYBOARD SHORTCUTS
+--------------------------------------------------------------------------------
+
+Global
+  ESC                 Close the topmost overlay
+                          settings panel  ->  search bar  ->  feed view
+
+Library grid (list view of all items)
+  Arrow keys          Navigate tile selection
+  Enter               Open selected tile in feed view
+  Delete              Delete selected item (with confirmation)
+  Mouse wheel         Scroll the grid
+
+Feed view (TikTok-style single-item playback)
+  Up                  Previous item
+  Down                Next item
+  Left  Right         Seek back / seek forward
+  Space               Pause / resume
+  M                   Toggle mute
+  Mouse wheel         Previous / next item (up = prev, down = next)
+
+URL bar (top input pill)
+  Enter               Start download from the pasted URL
+  ESC                 Clear / blur the input
+
+Search bar (when open via the search icon)
+  ESC                 Close search
+  (any key)           Live-filter the library as you type
+
+--------------------------------------------------------------------------------
+  AUDIO VISUALIZER INTEGRATION
+--------------------------------------------------------------------------------
+
+Audio-only items show an "Open Visualizer" button in the player canvas.
+Clicking it:
+
+  1. Reads VLC's current play position
+  2. Silences Drop's VLC (pause + mute + volume=0)
+  3. Launches the bundled visualizer EXE playing the same file from
+     Drop's current position
+  4. Polls the visualizer for its position every 500ms
+  5. On visualizer close, seeks Drop's VLC to where the visualizer left
+     off and restores audio settings (mute / volume; pause is left as-is)
+
+The visualizer is its own program. See visualizer/help.txt for its CLI
+flags and in-window controls.
+
+--------------------------------------------------------------------------------
+  EXTERNAL BINARIES (bundled at the repo root)
+--------------------------------------------------------------------------------
+
+  ffmpeg.exe          Thumbnail keyframe seek, audio decode for the
+                      visualizer, format conversion for downloads
+  yt-dlp.exe          All URL downloads (YouTube, TikTok, Spotify
+                      resolver target, etc.)
+  visualizer.exe      The audio visualizer subprocess. Lives next to
+                      Drop.exe in the built version. When running from
+                      source, the launcher uses visualizer/main.py
+                      directly via the current Python interpreter.
+
+Drop's get_bin() helper checks the repo root first, then PATH -- so
+keep these EXEs alongside drop.py / Drop.exe.
+
+--------------------------------------------------------------------------------
+  BUILD (PyInstaller)
+--------------------------------------------------------------------------------
+
+Main app (uses the included Drop.spec):
+
+    pyinstaller Drop.spec
+
+Output:  dist\Drop.exe   single-file build with the icon, bundled
+                         ffmpeg.exe / yt-dlp.exe, and all imports
+                         collected.
+
+Spec-free one-liner (for reference / if you don't want to use the spec):
+
+    pyinstaller --onefile --windowed --name Drop ^
+        --icon drop.ico ^
+        --add-binary "ffmpeg.exe;." ^
+        --add-binary "yt-dlp.exe;." ^
+        --collect-submodules vlc ^
+        drop.py
+
+Visualizer (built separately, dropped next to Drop.exe):
+
+    cd visualizer
+    pyinstaller --onefile --windowed --name visualizer ^
+        --icon ../drop.ico ^
+        --add-data "shaders;shaders" ^
+        --collect-binaries soundcard ^
+        --collect-binaries sounddevice ^
+        main.py
+    copy dist\visualizer.exe ..\dist\
+
+The --windowed flag matters on both: it produces a GUI-subsystem EXE
+with no console attached. Without it you get a console flash on launch
+and a terminal that hangs around after the GLFW window closes.
+
+================================================================================
+  github.com/tagratie
+================================================================================
