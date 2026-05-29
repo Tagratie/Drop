@@ -139,13 +139,6 @@ _REMIX_RE = re.compile(
 )
 
 
-def _is_remix_query(query):
-    """True if the resolved Spotify title looks like a remix/edit."""
-    if not query:
-        return False
-    return bool(_REMIX_RE.search(query))
-
-
 def _remix_modifier(query):
     """Return the specific modifier word ('slowed', 'sped up', …) from the
     query, or None."""

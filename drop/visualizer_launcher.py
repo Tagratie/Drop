@@ -182,14 +182,6 @@ class VisualizerLauncher:
         except Exception:
             pass
 
-    def toggle(self, **kwargs) -> bool:
-        """Stop if running, otherwise start. Returns the new state.
-        Wire this directly to a button command."""
-        if self.is_running():
-            self.stop()
-            return False
-        return self.start(**kwargs)
-
     # ── internals ──────────────────────────────────────────────────────────
 
     def _build_command(

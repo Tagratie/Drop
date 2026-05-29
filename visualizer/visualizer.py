@@ -186,7 +186,7 @@ class Visualizer:
 
     # ── render ─────────────────────────────────────────────────────────────
 
-    def render(self, aspect: float) -> None:
+    def render(self, aspect: float, target=None) -> None:
         self.renderer.render(
             time     = self.time,
             aspect   = aspect,
@@ -197,4 +197,5 @@ class Visualizer:
             pulse    = self.analyzer.bass_pulse,
             energy   = getattr(self, "_energy", 0.0),
             settings = self.settings,
+            target   = target,
         )

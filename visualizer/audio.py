@@ -31,6 +31,7 @@ Pipeline per update():
 """
 from __future__ import annotations
 
+import math
 import shutil
 import subprocess
 import sys
@@ -553,3 +554,151 @@ class FileAudioAnalyzer:
         self.bass = bass_now
         excess = max(0.0, bass_now - self.bass_smoothed)
         self.bass_pulse = self.bass_pulse * 0.78 + excess * 6.0
+
+
+# ═════════════════════════════════════════════════════════════════════════
+# Offline file analyzer (for video rendering)
+# ═════════════════════════════════════════════════════════════════════════
+
+
+class OfflineAudioAnalyzer:
+    """Decode an audio file up front and step through it at a fixed frame
+    rate — the analyzer behind `main.py --render`.
+
+    The realtime analyzers are paced by the audio device (wall clock):
+    update() reads whatever's newest in a buffer the audio thread fills.
+    That's wrong for offline rendering, where every video frame must map to
+    an exact audio timestamp no matter how long the render itself takes. So
+    this class decodes the whole file to mono PCM, then advances a playhead
+    by exactly one frame's worth of samples (samplerate / fps) per update().
+
+    Same public surface as AudioAnalyzer / FileAudioAnalyzer
+    (.smoothed / .raw / .bass / .bass_smoothed / .bass_pulse / .n_bands /
+    .samplerate + start/stop/update) so the Visualizer can't tell the
+    difference. Adds .total_frames — how many frames the render loop should
+    draw to cover the whole decoded track.
+    """
+
+    def __init__(
+        self,
+        file_path:     str,
+        fps:           int,
+        ffmpeg_path:   Optional[str] = None,
+        start_seconds: float         = 0.0,
+        samplerate:    int           = SAMPLE_RATE,
+        fft_size:      int           = FFT_SIZE,
+        n_bands:       int           = N_BANDS,
+    ):
+        self.file_path     = file_path
+        self.fps           = fps
+        self.ffmpeg_path   = ffmpeg_path or self._find_ffmpeg()
+        self.start_seconds = start_seconds
+        self.samplerate    = samplerate
+        self.fft_size      = fft_size
+        self.n_bands       = n_bands
+
+        # FFT window + log-spaced band edges — identical setup to the
+        # realtime analyzers so the rendered look matches the live one.
+        self.window = np.hanning(fft_size).astype(np.float32)
+        n_bins = fft_size // 2 + 1
+        bin_freqs = np.linspace(0, samplerate / 2, n_bins)
+        log_edges = np.logspace(np.log10(30), np.log10(16000), n_bands + 1)
+        self._band_lo = np.searchsorted(bin_freqs, log_edges[:-1]).astype(np.int32)
+        self._band_hi = np.searchsorted(bin_freqs, log_edges[1:]).astype(np.int32)
+        self._band_hi = np.maximum(self._band_hi, self._band_lo + 1)
+
+        self.smoothed = np.zeros(n_bands, dtype=np.float32)
+        self.raw      = np.zeros(n_bands, dtype=np.float32)
+        self.bass          = 0.0
+        self.bass_smoothed = 0.0
+        self.bass_pulse    = 0.0
+
+        # Decoded mono PCM + playhead, both filled in by start().
+        self._pcm: Optional[np.ndarray] = None
+        self._hop = samplerate / float(fps)   # samples advanced per frame
+        self._pos = 0.0                        # float sample index of playhead
+        self.total_frames = 0
+
+    def _find_ffmpeg(self) -> str:
+        found = shutil.which("ffmpeg")
+        return found if found else "ffmpeg"
+
+    def start(self) -> None:
+        """Decode the whole file (from start_seconds to EOF) to mono float32
+        PCM at our samplerate in one synchronous ffmpeg call."""
+        cmd = [
+            self.ffmpeg_path,
+            "-loglevel", "error",
+            "-nostdin",
+            "-ss", f"{self.start_seconds:.3f}",
+            "-i", self.file_path,
+            "-f", "f32le",
+            "-ar", str(self.samplerate),
+            "-ac", "1",
+            "-",
+        ]
+        try:
+            proc = subprocess.run(
+                cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE
+            )
+        except FileNotFoundError:
+            raise RuntimeError(
+                f"ffmpeg not found at {self.ffmpeg_path!r}. Pass --ffmpeg-path "
+                f"or install ffmpeg and put it on PATH."
+            )
+        if proc.returncode != 0:
+            err = proc.stderr.decode("utf-8", "replace").strip()
+            raise RuntimeError(
+                f"ffmpeg failed to decode {self.file_path!r}:\n{err}"
+            )
+        self._pcm = np.frombuffer(proc.stdout, dtype=np.float32)
+        duration = len(self._pcm) / float(self.samplerate)
+        # ceil so the final partial frame still gets drawn.
+        self.total_frames = int(math.ceil(duration * self.fps))
+
+    def stop(self) -> None:
+        # Decode was synchronous and owns no handles — just drop the PCM.
+        self._pcm = None
+
+    def update(self) -> None:
+        """Run the FFT/banding/smoothing pipeline on the FFT_SIZE-sample
+        window ending at the current playhead, then advance one frame.
+
+        Body mirrors AudioAnalyzer.update() — kept inline to match the
+        deliberate duplication already in this module (see the note above
+        FileAudioAnalyzer.update)."""
+        pcm = self._pcm
+        # Gather the FFT_SIZE samples ending at the playhead, zero-padding
+        # at the head (before t=0) and tail (past EOF).
+        end   = int(self._pos)
+        start = end - self.fft_size
+        samples = np.zeros(self.fft_size, dtype=np.float32)
+        if pcm is not None:
+            lo = max(start, 0)
+            hi = min(end, len(pcm))
+            if hi > lo:
+                samples[lo - start: lo - start + (hi - lo)] = pcm[lo:hi]
+
+        windowed = samples * self.window
+        spectrum = np.abs(np.fft.rfft(windowed))
+
+        bands = np.empty(self.n_bands, dtype=np.float32)
+        for i in range(self.n_bands):
+            lo, hi = self._band_lo[i], self._band_hi[i]
+            bands[i] = spectrum[lo:hi].mean()
+
+        bands = gaussian_filter1d(bands, sigma=1.2)
+        bands = np.log1p(bands * 4.0) / 5.0
+        np.clip(bands, 0.0, 1.5, out=bands)
+
+        self.smoothed[:] = self.smoothed * 0.85 + bands * 0.15
+        self.raw[:]      = bands
+
+        n_bass = max(2, self.n_bands // 8)
+        bass_now = float(bands[:n_bass].mean())
+        self.bass_smoothed = self.bass_smoothed * 0.80 + bass_now * 0.20
+        self.bass = bass_now
+        excess = max(0.0, bass_now - self.bass_smoothed)
+        self.bass_pulse = self.bass_pulse * 0.78 + excess * 6.0
+
+        self._pos += self._hop

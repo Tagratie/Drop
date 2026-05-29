@@ -63,10 +63,6 @@ class ThumbnailCache:
         # since they're idle and consume only ~KB of RAM each.
         self._sem       = threading.Semaphore(self.MAX_WORKERS)
 
-    @property
-    def has_ffmpeg(self):
-        return self._ffmpeg is not None
-
     def _key_for(self, path):
         # Mix in mtime so re-encoded files invalidate the cache automatically.
         # Bumped version tag to v3 so the speed-pass invalidates v2 thumbs;
@@ -196,9 +192,6 @@ class PreviewCache:
         self._listeners = {}
         self._ffmpeg    = get_ffmpeg()
         self._sem       = threading.Semaphore(self.MAX_WORKERS)
-
-    @property
-    def has_ffmpeg(self): return self._ffmpeg is not None
 
     def _key_for(self, path):
         try: mt = int(os.path.getmtime(path))

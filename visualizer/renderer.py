@@ -462,13 +462,19 @@ class Renderer:
         pulse: float,
         energy: float,
         settings=None,
+        target=None,
     ) -> None:
         """Run the full pipeline. All transient uniforms come in via kwargs
         so the call site reads like documentation.
 
         `settings` is an optional object with boolean attributes that gate
         the post-processing effects. Missing attributes default to True
-        so the renderer works fine if no settings are supplied."""
+        so the renderer works fine if no settings are supplied.
+
+        `target` is an optional moderngl.Framebuffer to composite the final
+        image into instead of the screen. The offline video renderer passes
+        an offscreen FBO here so it can read the frame back; live mode
+        leaves it None and draws straight to ctx.screen."""
         ctx = self.ctx
         w, h = self.width, self.height
 
@@ -566,11 +572,14 @@ class Renderer:
             self.prog_blur["u_direction"].value  = (0.0, 1.0)
             self.vao_blur.render(moderngl.TRIANGLES)
 
-        # ── PASS 4: composite scene + bloom → default framebuffer (screen) ─
+        # ── PASS 4: composite scene + bloom → screen (or offscreen target) ─
         # Bloom and chromatic aberration are toggleable — we just zero
         # the strength uniforms when disabled. The bloom passes above
         # still run (negligible cost), but their contribution disappears.
-        ctx.screen.use()
+        # `target` redirects the final image to an offscreen FBO for the
+        # offline video renderer; None means draw to the visible screen.
+        out_fbo = target if target is not None else ctx.screen
+        out_fbo.use()
         ctx.viewport = (0, 0, w, h)
         ctx.clear(0.0, 0.0, 0.0, 1.0)
         self.scene_tex.use(0)

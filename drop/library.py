@@ -211,21 +211,30 @@ class Library:
             self.save()
 
     def toggle_favorite(self, lib, idx):
-        """Flip the `favorite` flag on items[lib][idx]. When favoriting, also
-        moves the item to the head of the list so a newly-pinned item lands
-        at the very top of the favorites section (the visible sort is stable,
-        so otherwise it'd appear *after* any existing favorites). Returns
-        (new_flag: bool, new_idx: int)."""
+        """Flip the `favorite` flag on items[lib][idx].
+
+        Favoriting moves the item to the head of the list (so it lands at
+        the very top of the favorites section — the visible sort is stable)
+        and remembers the pre-favorite index under `_orig_idx`. Unfavoriting
+        pops the item and re-inserts it at that remembered index, clamped to
+        the current list bounds, so it returns to roughly where it lived
+        before. Returns (new_flag: bool, new_idx: int)."""
         items = self.data["items"].get(lib, [])
         if not (0 <= idx < len(items)):
             return False, idx
-        new = not bool(items[idx].get("favorite", False))
-        items[idx]["favorite"] = new
-        new_idx = idx
+        item = items[idx]
+        new = not bool(item.get("favorite", False))
+        item["favorite"] = new
         if new:
-            item = items.pop(idx)
+            item["_orig_idx"] = idx
+            items.pop(idx)
             items.insert(0, item)
             new_idx = 0
+        else:
+            orig = int(item.pop("_orig_idx", idx))
+            items.pop(idx)
+            new_idx = max(0, min(orig, len(items)))
+            items.insert(new_idx, item)
         self.save()
         return new, new_idx
 
@@ -256,13 +265,6 @@ class Library:
         if lib in self.data["items"]:
             self.data["items"][lib] = []
             self.save()
-
-    def find_by_path(self, path):
-        for lib in self.data["libraries"]:
-            for i, it in enumerate(self.data["items"].get(lib, [])):
-                if it.get("path") == path:
-                    return lib, i
-        return None, None
 
     # ── on-disk folder management ────────────────────────────────────────────
     def dir_for(self, name):

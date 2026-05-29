@@ -36,6 +36,17 @@ Audio source -- file mode (this is what Drop uses)
                            seconds) to this file every ~250ms. Drop reads
                            this on viz close to seek itself in sync.
 
+Render to a video file (offline)
+  --render <OUTPUT>        Instead of opening a window, render the visualizer
+                           for --file straight to this video file (e.g.
+                           out.mp4) and exit. Requires --file. The original
+                           audio is muxed into the result. Runs as fast as
+                           the GPU + encoder allow -- not real time -- and is
+                           deterministic. Needs ffmpeg (--ffmpeg-path or PATH).
+                           Use --width/--height for resolution.
+  --fps <N>                Frame rate of the --render output (default 60).
+                           Ignored outside render mode.
+
 --------------------------------------------------------------------------------
   RUNTIME CONTROLS (inside the visualizer window)
 --------------------------------------------------------------------------------
@@ -70,6 +81,9 @@ Audio source -- file mode (this is what Drop uses)
 
   Play a file directly (the Drop-launch path):
       python main.py --file song.mp3 --start 45.2
+
+  Render a file to a 1080p60 video (music muxed in):
+      python main.py --file song.mp3 --render out.mp4 --width 1920 --height 1080 --fps 60
 
   Fullscreen at native resolution:
       python main.py --fullscreen

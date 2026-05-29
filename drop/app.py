@@ -3,12 +3,41 @@ update banner, downloader/library wiring."""
 import os
 import re
 import sys
+import math
 import json
 import time
 import shutil
 import threading
 import subprocess
 from pathlib import Path
+
+
+def _heart_polygon_points(cx, cy, w, h, n=44):
+    """Return flat list of polygon points for a heart fitting in (w, h) box
+    centered at (cx, cy). Used by the favorite toggle so outline+filled
+    states share identical geometry."""
+    raw = []
+    for i in range(n):
+        t = 2.0 * math.pi * i / n
+        x = 16.0 * (math.sin(t) ** 3)
+        # Negate so the heart's point is at +y (canvas y grows downward).
+        y = -(13.0 * math.cos(t)
+              - 5.0 * math.cos(2 * t)
+              - 2.0 * math.cos(3 * t)
+              - math.cos(4 * t))
+        raw.append((x, y))
+    xs = [p[0] for p in raw]
+    ys = [p[1] for p in raw]
+    rw = max(xs) - min(xs)
+    rh = max(ys) - min(ys)
+    s = min(w / rw, h / rh)
+    midx = (max(xs) + min(xs)) / 2
+    midy = (max(ys) + min(ys)) / 2
+    out = []
+    for (x, y) in raw:
+        out.append((x - midx) * s + cx)
+        out.append((y - midy) * s + cy)
+    return out
 
 import tkinter as tk
 import tkinter.font as tkfont
@@ -571,11 +600,15 @@ class App:
                                    font=self.f_label, padx=12)
         self.title_lbl.pack(side="left")
 
-        # Window controls on the right (close last so it's furthest right)
+        # Window controls on the right (close last so it's furthest right).
+        # fill="y" makes each label stretch to the full title bar height so
+        # the hover bg covers the whole button cell — without it, the hover
+        # color only fills the glyph + padding, leaving an uncolored strip
+        # above and below.
         self.btn_close = tk.Label(self.title_bar, text=G_CLOSE, bg=BG, fg=SOFT,
                                    font=ctrl_font, cursor="hand2",
                                    padx=14, pady=4)
-        self.btn_close.pack(side="right")
+        self.btn_close.pack(side="right", fill="y")
         self.btn_close.bind("<Button-1>", lambda e: self.hide())
         self.btn_close.bind("<Enter>",
             lambda e: (self.btn_close.configure(bg=ERROR, fg="#000")))
@@ -585,7 +618,7 @@ class App:
         self.btn_max = tk.Label(self.title_bar, text=G_MAX, bg=BG, fg=SOFT,
                                  font=ctrl_font, cursor="hand2",
                                  padx=14, pady=4)
-        self.btn_max.pack(side="right")
+        self.btn_max.pack(side="right", fill="y")
         self.btn_max.bind("<Button-1>", lambda e: self._toggle_maximize())
         self.btn_max.bind("<Enter>",
             lambda e: (self.btn_max.configure(bg=BG3, fg=TEXT)))
@@ -595,7 +628,7 @@ class App:
         self.btn_min = tk.Label(self.title_bar, text=G_MIN, bg=BG, fg=SOFT,
                                  font=ctrl_font, cursor="hand2",
                                  padx=14, pady=4)
-        self.btn_min.pack(side="right")
+        self.btn_min.pack(side="right", fill="y")
         self.btn_min.bind("<Button-1>", lambda e: self._minimize())
         self.btn_min.bind("<Enter>",
             lambda e: (self.btn_min.configure(bg=BG3, fg=TEXT)))
@@ -1751,16 +1784,6 @@ class App:
         # new download (via _set_bar_state_busy).
         return
 
-    def _set_busy(self, on):
-        # Bridge for code paths that still call _set_busy (e.g. external
-        # callers). Delegates to the state machine.
-        if on:
-            self._set_bar_state_busy()
-        else:
-            # Don't auto-revert to idle — the BUSY → DONE / IDLE decision
-            # is made in _on_done based on success/failure.
-            pass
-
     def _show_status(self, text="", fg=SOFT):
         # Status label is no longer visible in the pill; we still update
         # self.status (off-screen widget) so anything that reads it keeps
@@ -1779,11 +1802,6 @@ class App:
                 _ = cur  # keep ref so linters don't complain
             except Exception:
                 pass
-
-    def _refit_bar(self):
-        # No-op under Option A — the window is locked at BAR_H_S, no refit
-        # needed. Kept as a stub so older callers don't error.
-        return
 
     def _set_progress(self, pct):
         # Treat None as "leave alone" rather than "reset to 0". That way
@@ -2262,30 +2280,30 @@ class App:
         band.place(relx=0, rely=1.0, relwidth=1, anchor="sw", height=42)
 
         is_fav = bool(item.get("favorite", False))
-        # Canvas-based heart so the widget footprint is fixed regardless of
-        # whether ♡ and ♥ have different glyph widths in the system font —
-        # toggling visibly "fills in" the same shape, no size jump.
+        # Heart is drawn as a Canvas polygon so the outline and filled states
+        # share *identical* geometry — the only difference is fill="" vs
+        # fill=FAV_RED. Unicode ♡/♥ glyphs render at different sizes in most
+        # fonts, which made the heart visibly shrink/grow on toggle.
         FAV_RED = "#ff4d6d"
         HEART_W, HEART_H = 22, 20
         heart = tk.Canvas(band, width=HEART_W, height=HEART_H, bg="#0c0c0c",
                           highlightthickness=0, bd=0, cursor="hand2")
-        heart.create_text(HEART_W // 2, HEART_H // 2,
-                          text=("♥" if is_fav else "♡"),
-                          fill=FAV_RED,
-                          font=(self.f_meta[0], 14, "bold"),
-                          tags="glyph")
+        pts = _heart_polygon_points(HEART_W / 2, HEART_H / 2,
+                                    HEART_W - 4, HEART_H - 4)
+        heart.create_polygon(pts, smooth=True,
+                             fill=(FAV_RED if is_fav else ""),
+                             outline=FAV_RED, width=2, tags="glyph")
         # Pack BEFORE the text column so side="right" takes its slot first
         # and the title doesn't stretch into the heart's space.
         if not self._selection_mode:
             heart.pack(side="right", padx=(0, 8))
         card._fav_heart = heart
         card._fav_is = is_fav
-        card._fav_glyph_font = (self.f_meta[0], 14, "bold")
 
-        def _toggle_fav(_e=None, i=idx):
-            self._toggle_favorite(i)
-            return "break"  # don't fall through to tile click
-        heart.bind("<Button-1>", _toggle_fav)
+        # Read card._idx at click time so a favorite/unfavorite reorder can
+        # just shuffle the tiles and update card._idx — no widget rebuild.
+        heart.bind("<Button-1>",
+            lambda e, c=card: (self._toggle_favorite(c._idx), "break")[1])
 
         # Text column on the left of the band. Wrapping title + meta in their
         # own frame lets the heart claim the right edge cleanly without the
@@ -2331,25 +2349,24 @@ class App:
             except Exception:
                 return True
 
+        # Stash mutable idx + path on the card so favorite-reorder can shuffle
+        # tiles without rebinding everything. Closures below read card._idx
+        # at call time, not bake-time.
+        card._idx       = idx
+        card._item_path = path
+
         def on_enter(_e=None):
             if tile_state["hovering"]: return
             tile_state["hovering"] = True
             for w in (band, text_col, title_lbl, meta_lbl, heart):
                 try: w.configure(bg="#181818")
                 except Exception: pass
-            # Skip preview playback while selecting — a moving preview over
-            # a checkbox would just fight the user's attention, and the
-            # cancel-on-click toggle would feel laggy if VLC was warming up.
             if self._selection_mode:
                 return
-            # Honor the user's "preview on hover" preference — off by default
-            # since spinning up VLC on every tile costs noticeably more
-            # battery/CPU than the static thumbnail.
             if not getattr(self, "preview_enabled", False):
                 return
-            # Kick off preview playback if we have a real video.
             if is_video and path and os.path.exists(path):
-                self._start_hover_preview(idx, thumb_lbl, path)
+                self._start_hover_preview(card._idx, thumb_lbl, path)
 
         def on_leave(e=None):
             if e is not None and not really_left(e):
@@ -2359,14 +2376,14 @@ class App:
             for w in (band, text_col, title_lbl, meta_lbl, heart):
                 try: w.configure(bg="#0c0c0c")
                 except Exception: pass
-            self._stop_hover_preview(idx, thumb_lbl)
+            self._stop_hover_preview(card._idx, thumb_lbl)
 
         clickable = (card, inner, thumb_lbl, band, title_lbl, meta_lbl, badge)
         for w in clickable:
-            w.bind("<Button-1>",       lambda e, i=idx, c=card: self._tile_press(e, i, c))
-            w.bind("<B1-Motion>",      lambda e, i=idx, c=card: self._tile_drag(e, i, c))
-            w.bind("<ButtonRelease-1>", lambda e, i=idx, c=card: self._tile_release(e, i, c))
-            w.bind("<Button-3>", lambda e, i=idx: self._show_card_menu(e, i))
+            w.bind("<Button-1>",        lambda e, c=card: self._tile_press(e, c._idx, c))
+            w.bind("<B1-Motion>",       lambda e, c=card: self._tile_drag(e, c._idx, c))
+            w.bind("<ButtonRelease-1>", lambda e, c=card: self._tile_release(e, c._idx, c))
+            w.bind("<Button-3>",        lambda e, c=card: self._show_card_menu(e, c._idx))
             w.bind("<Enter>", on_enter)
             w.bind("<Leave>", on_leave)
 
@@ -3975,195 +3992,165 @@ class App:
         self._render_library()
 
     def _toggle_favorite(self, idx):
-        """Flip the heart on items[active][idx]. When the item is *becoming*
-        a favorite, fires a particle burst at the heart and slides a ghost
-        of the tile to the new top-left slot — masks the grid re-render
-        flash. Unfavoriting just re-renders (no slide needed, the user
-        clicked a top-row item to demote it)."""
+        """Flip the heart on items[active][idx]. In grid mode, the existing
+        tile widgets are re-positioned in place (no destroy/recreate, no
+        thumbnail re-requests) and slid to their new sorted positions.
+        Favoriting bubbles the item to the top-left; unfavoriting sends it
+        back to its remembered pre-favorite slot."""
         try: self._cancel_all_hovers()
         except Exception: pass
         items = self.library.items_in(self.library.active)
         if not (0 <= idx < len(items)):
             return
-        tile = (getattr(self, "_tiles_by_idx", {}) or {}).get(idx)
 
-        # Fill the heart on the source tile BEFORE we snapshot it, so the
-        # ghost shows the filled state mid-slide instead of popping from
-        # outline → filled at the landing. Full update() (not just
-        # update_idletasks) forces an actual paint cycle so ImageGrab sees
-        # the new pixels rather than the stale outline.
-        if tile is not None and tile.winfo_exists():
-            try:
-                heart = getattr(tile, "_fav_heart", None)
-                if heart is not None:
-                    heart.delete("glyph")
-                    heart.create_text(
-                        int(heart.winfo_reqwidth() / 2),
-                        int(heart.winfo_reqheight() / 2),
-                        text="♥", fill="#ff4d6d",
-                        font=getattr(tile, "_fav_glyph_font",
-                                     (self.f_meta[0], 14, "bold")),
-                        tags="glyph",
-                    )
-                    heart.update()
-            except Exception:
-                pass
-
-        becoming_fav, new_idx = self.library.toggle_favorite(
-            self.library.active, idx
-        )
-
-        if not (becoming_fav and tile is not None and tile.winfo_exists()):
+        # List view doesn't share the place/grid geometry — just rebuild.
+        if getattr(self, "lib_layout", "grid") == "list":
+            self.library.toggle_favorite(self.library.active, idx)
             self._render_library()
             return
 
-        try: self._fire_heart_particles(tile)
-        except Exception: pass
-        try: self._animate_fav_slide(new_idx, tile)
-        except Exception: self._render_library()
+        self._fav_reorder_inplace(idx)
 
-    def _fire_heart_particles(self, tile):
-        """Tiny heart burst at the favorite button. Lives on a Toplevel with
-        -transparentcolor on Windows so the particles float over the app
-        without a visible backdrop. Survives the grid re-render that follows
-        the favorite toggle."""
-        heart = getattr(tile, "_fav_heart", None)
+    def _update_heart(self, card, is_fav):
+        """Repaint just the heart polygon's fill. No widget rebuild."""
+        heart = getattr(card, "_fav_heart", None)
         if heart is None or not heart.winfo_exists():
             return
         try:
-            heart.update_idletasks()
-            cx = heart.winfo_rootx() + heart.winfo_width() / 2
-            cy = heart.winfo_rooty() + heart.winfo_height() / 2
-        except Exception:
-            return
-
-        FIELD = 110   # half-extent of the particle field
-        overlay = tk.Toplevel(self.root)
-        overlay.overrideredirect(True)
-        try:
-            overlay.attributes("-topmost", True)
-            # Pick an unlikely color as the transparent key — anything that
-            # happens to use this RGB in the canvas becomes see-through.
-            overlay.attributes("-transparentcolor", "#010203")
+            heart.itemconfigure("glyph", fill=("#ff4d6d" if is_fav else ""))
         except Exception:
             pass
-        overlay.geometry(f"{FIELD*2}x{FIELD*2}+{int(cx-FIELD)}+{int(cy-FIELD)}")
-        canvas = tk.Canvas(overlay, width=FIELD * 2, height=FIELD * 2,
-                           bg="#010203", highlightthickness=0, bd=0)
-        canvas.pack()
+        card._fav_is = is_fav
 
-        import math, random, time
-        parts = []
-        for i in range(7):
-            angle = (i / 7) * 2 * math.pi + random.uniform(-0.18, 0.18)
-            speed = random.uniform(45, 78)
-            parts.append({
-                "vx":   math.cos(angle) * speed,
-                "vy":   math.sin(angle) * speed - 22,   # slight upward bias
-                "id":   canvas.create_text(
-                            FIELD, FIELD, text="♥", fill="#ff4d6d",
-                            font=(self.f_meta[0],
-                                  random.choice((10, 11, 12)), "bold")),
-            })
+    def _fav_reorder_inplace(self, idx):
+        """Toggle favorite + slide existing tiles to new positions WITHOUT
+        rebuilding anything. The closures on each tile read card._idx, so
+        we just update those refs after the library mutation and animate the
+        tiles between their old place() coords and new grid-derived ones."""
+        items = self.library.items_in(self.library.active)
+        old_tiles = getattr(self, "_tiles_by_idx", None) or {}
 
-        DURATION = 460
+        # 1. Snapshot old positions by path. Path is the stable identity —
+        # idx changes when favoriting bubbles items to the head of the list.
+        old_pos_by_path = {}
+        for old_idx, tile in old_tiles.items():
+            if tile is None or not tile.winfo_exists():       continue
+            if not (0 <= old_idx < len(items)):                continue
+            path = items[old_idx].get("path")
+            if not path: continue
+            try:
+                tile.update_idletasks()
+                old_pos_by_path[path] = (tile.winfo_x(), tile.winfo_y())
+            except Exception:
+                pass
+
+        # 2. Find the toggled tile so we can repaint its heart fill in place.
+        toggled_path = items[idx].get("path")
+        toggled_tile = None
+        for ti in old_tiles.values():
+            if getattr(ti, "_item_path", None) == toggled_path:
+                toggled_tile = ti
+                break
+
+        # 3. Mutate library state.
+        becoming_fav, _ = self.library.toggle_favorite(self.library.active, idx)
+        if toggled_tile is not None:
+            self._update_heart(toggled_tile, becoming_fav)
+
+        # 4. Recompute the visible (sorted) order.
+        items_new = self.library.items_in(self.library.active)
+        q = (self._search_query or "").strip().lower()
+        if q:
+            visible = [(i, it) for i, it in enumerate(items_new)
+                       if q in (it.get("title", "") or "").lower()
+                       or q in (it.get("source", "") or "").lower()]
+        else:
+            visible = list(enumerate(items_new))
+        visible.sort(key=lambda p: not bool(p[1].get("favorite", False)))
+
+        # 5. Update card._idx + rebuild _tiles_by_idx from path identity.
+        path_to_new_real = {it.get("path"): i
+                            for i, it in enumerate(items_new)
+                            if it.get("path")}
+        new_tiles_by_idx = {}
+        for ti in list(old_tiles.values()):
+            if ti is None or not ti.winfo_exists():
+                continue
+            path = getattr(ti, "_item_path", None)
+            if not path:
+                continue
+            new_real_idx = path_to_new_real.get(path)
+            if new_real_idx is None:
+                continue
+            ti._idx = new_real_idx
+            new_tiles_by_idx[new_real_idx] = ti
+        self._tiles_by_idx = new_tiles_by_idx
+
+        # 6. Compute new tile geometry + slide each visible tile from its
+        # old position to the new grid cell.
+        cols = self._grid_cols
+        target_w = self._geom.get("lib_w", self.LIB_W)
+        cw = max(self.grid_canvas.winfo_width(), target_w - 24, 320)
+        tile_w = max(140, (cw - 8 * cols) // cols)
+        tile_h = min(int(tile_w * 16 / 9), 360)
+
+        pairs = []  # (tile, sx, sy, dx, dy, w, h)
+        for slot, (real_idx, _) in enumerate(visible):
+            tile = new_tiles_by_idx.get(real_idx)
+            if tile is None:
+                continue
+            row, col = divmod(slot, cols)
+            # Match _render_grid_tiles: padx=4, pady=4 around each tile,
+            # so each cell is (tile_w + 8) by (tile_h + 8) and the tile
+            # itself starts 4px in.
+            dx = col * (tile_w + 8) + 4
+            dy = row * (tile_h + 8) + 4
+            old = old_pos_by_path.get(getattr(tile, "_item_path", None))
+            sx, sy = old if old else (dx, dy)
+            pairs.append((tile, sx, sy, dx, dy, tile_w, tile_h))
+            try:
+                tile.grid_forget()
+                tile.place(x=sx, y=sy, width=tile_w, height=tile_h)
+            except Exception:
+                pass
+
+        if not pairs:
+            return
+
+        # Token guard so a rapid second click cleanly supersedes this run.
+        self._fav_anim_token = getattr(self, "_fav_anim_token", 0) + 1
+        my_token = self._fav_anim_token
+
+        DURATION = 240
         start = time.perf_counter()
         def tick():
+            if self._fav_anim_token != my_token:
+                return
             elapsed = (time.perf_counter() - start) * 1000
             t = min(elapsed / DURATION, 1.0)
-            ease = 1 - (1 - t) ** 2     # ease-out quad on motion
-            for p in parts:
-                nx = FIELD + p["vx"] * ease * 1.4
-                ny = FIELD + p["vy"] * ease * 1.4 + 0.5 * 200 * t * t
+            ease = 1 - (1 - t) ** 3   # ease-out cubic
+            for (tile, sx, sy, dx, dy, tw, th) in pairs:
                 try:
-                    canvas.coords(p["id"], nx, ny)
-                    k = 1.0 - t
-                    r = int(0xff * k + 0x01 * (1 - k))
-                    g = int(0x4d * k + 0x02 * (1 - k))
-                    b = int(0x6d * k + 0x03 * (1 - k))
-                    canvas.itemconfigure(p["id"], fill=f"#{r:02x}{g:02x}{b:02x}")
+                    x = sx + (dx - sx) * ease
+                    y = sy + (dy - sy) * ease
+                    tile.place(x=x, y=y, width=tw, height=th)
                 except Exception:
                     pass
             if t < 1.0:
                 self.root.after(16, tick)
             else:
-                try: overlay.destroy()
-                except Exception: pass
-        tick()
-
-    def _animate_fav_slide(self, idx, tile):
-        """Snapshot the favorited tile, trigger the grid re-render (which
-        moves the real tile to the top-left), then slide a Toplevel ghost
-        from the original screen position to the new one. The ghost sits on
-        top of the freshly-rebuilt grid so the user only sees a smooth slide,
-        not a re-render flash."""
-        try:
-            from PIL import ImageGrab, ImageTk
-        except Exception:
-            self._render_library()
-            return
-
-        try:
-            tile.update_idletasks()
-            sx = tile.winfo_rootx()
-            sy = tile.winfo_rooty()
-            sw = tile.winfo_width()
-            sh = tile.winfo_height()
-        except Exception:
-            self._render_library()
-            return
-        if sw < 4 or sh < 4:
-            self._render_library()
-            return
-
-        try:
-            shot = ImageGrab.grab(bbox=(sx, sy, sx + sw, sy + sh))
-        except Exception:
-            self._render_library()
-            return
-
-        # Re-render so the real grid reflects the new order. The favorited
-        # item is now at idx in the underlying list, which sorts to the
-        # top-left in the visible layout.
-        self._render_library()
-        self.root.update_idletasks()
-
-        target = (getattr(self, "_tiles_by_idx", {}) or {}).get(idx)
-        if target is None or not target.winfo_exists():
-            return
-        try:
-            target.update_idletasks()
-            tx = target.winfo_rootx()
-            ty = target.winfo_rooty()
-        except Exception:
-            return
-
-        ghost = tk.Toplevel(self.root)
-        ghost.overrideredirect(True)
-        try: ghost.attributes("-topmost", True)
-        except Exception: pass
-        photo = ImageTk.PhotoImage(shot)
-        lbl = tk.Label(ghost, image=photo, bd=0, highlightthickness=0, bg=BG)
-        lbl.image = photo  # keep reference alive
-        lbl.pack()
-        ghost.geometry(f"{sw}x{sh}+{sx}+{sy}")
-
-        import time
-        start = time.perf_counter()
-        DURATION = 280
-        def tick():
-            elapsed = (time.perf_counter() - start) * 1000
-            t = min(elapsed / DURATION, 1.0)
-            ease = 1 - (1 - t) ** 3   # ease-out cubic — quick lift, soft land
-            x = int(sx + (tx - sx) * ease)
-            y = int(sy + (ty - sy) * ease)
-            try: ghost.geometry(f"{sw}x{sh}+{x}+{y}")
-            except Exception: return
-            if t < 1.0:
-                self.root.after(16, tick)
-            else:
-                try: ghost.destroy()
-                except Exception: pass
+                # Hand the tiles back to grid() so subsequent layout
+                # behaves normally.
+                for slot, (real_idx, _) in enumerate(visible):
+                    tile = new_tiles_by_idx.get(real_idx)
+                    if tile is None or not tile.winfo_exists():
+                        continue
+                    try:
+                        tile.place_forget()
+                        tile.grid(row=slot // cols, column=slot % cols,
+                                  padx=4, pady=4, sticky="nsew")
+                    except Exception:
+                        pass
         tick()
 
     def _rotate_card(self, idx):

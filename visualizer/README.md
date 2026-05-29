@@ -40,6 +40,25 @@ python main.py --fullscreen
 Press **ESC** to quit. The window is resizable; the renderer rebuilds its
 framebuffers automatically on size change.
 
+## Render to a video file
+
+Instead of opening a window, render the visualizer for an audio file
+straight to an `.mp4`. This is **offline** — it runs as fast as your GPU and
+encoder allow, not in real time, and is deterministic.
+
+```bash
+# Render song.mp3 to a 1080p60 video with the music muxed in:
+python main.py --file song.mp3 --render out.mp4 --width 1920 --height 1080 --fps 60
+
+# Lighter/faster: 720p30
+python main.py --file song.mp3 --render out.mp4 --fps 30
+```
+
+`--render` requires `--file` (the audio drives the visuals and is muxed into
+the output) and needs **ffmpeg** (on PATH, or pass `--ffmpeg-path` — Drop
+bundles one). Each frame is drawn to an offscreen framebuffer and piped to
+ffmpeg, which encodes H.264 + AAC and trims to the shorter stream.
+
 ## System audio by OS
 
 The mic path "just works" everywhere. System audio (what's coming out of

@@ -134,15 +134,6 @@ class RoundedButton(tk.Canvas):
             _flash_canvas_button(self)
             self._cmd()
 
-    def flash(self):
-        """Public flash trigger — useful when you want a button to flash
-        without a real click (e.g. keyboard-shortcut feedback)."""
-        _flash_canvas_button(self)
-
-    def set_text(self, text):
-        self._text = text
-        self._draw(self._bg)
-
     def set_state(self, *, bg=None, fg=None, hover_bg=None, text=None, enabled=None):
         if bg is not None:        self._bg = bg
         if fg is not None:        self._fg = fg
@@ -227,14 +218,6 @@ class BookButton(tk.Canvas):
             _flash_canvas_button(self)
             self._cmd()
 
-    def flash(self):
-        _flash_canvas_button(self)
-
-    def configure_height(self, h):
-        """Match a sibling's height precisely."""
-        self.configure(height=h, width=h)
-        self._draw(self._bg)
-
 
 
 
@@ -282,9 +265,6 @@ class DotsButton(tk.Canvas):
         if self._enabled and self._cmd:
             _flash_canvas_button(self)
             self._cmd()
-
-    def flash(self):
-        _flash_canvas_button(self)
 
 
 
@@ -365,9 +345,6 @@ class SpeakerButton(tk.Canvas):
         if self._enabled and self._cmd:
             _flash_canvas_button(self)
             self._cmd()
-
-    def flash(self):
-        _flash_canvas_button(self)
 
 
 
@@ -452,9 +429,6 @@ class InfoButton(tk.Canvas):
             _flash_canvas_button(self)
             self._cmd()
 
-    def flash(self):
-        _flash_canvas_button(self)
-
 
 # ── main GUI ─────────────────────────────────────────────────────────────────
 
@@ -482,10 +456,6 @@ class SearchButton(tk.Canvas):
         self.bind("<Leave>",     lambda e: self._enabled and self._draw(self._bg))
         self.bind("<Button-1>",  self._on_click)
         self.configure(cursor="hand2")
-        self._draw(self._bg)
-
-    def set_closing(self, closing):
-        self._closing = bool(closing)
         self._draw(self._bg)
 
     def _draw(self, fill):
@@ -530,9 +500,6 @@ class SearchButton(tk.Canvas):
         if self._enabled and self._cmd:
             _flash_canvas_button(self)
             self._cmd()
-
-    def flash(self):
-        _flash_canvas_button(self)
 
 
 class IconButton(tk.Canvas):
@@ -641,9 +608,6 @@ class IconButton(tk.Canvas):
             _flash_canvas_button(self)
             self._cmd()
 
-    def flash(self):
-        _flash_canvas_button(self)
-
 
 class TogglePill(tk.Canvas):
     """A pill-shaped on/off toggle. Same visual language as the rest of the
@@ -671,13 +635,6 @@ class TogglePill(tk.Canvas):
         self.bind("<Button-1>",  self._on_click)
         self.configure(cursor="hand2")
         self._draw()
-
-    def set_on(self, on):
-        self._on = bool(on)
-        self._draw()
-
-    def is_on(self):
-        return self._on
 
     def _draw(self):
         self.delete("all")
@@ -786,12 +743,6 @@ class VolumeSlider(tk.Canvas):
                 pass
 
     # ── public API ──────────────────────────────────────────────────────────
-    def get_value(self):
-        return self._value
-
-    def is_muted(self):
-        return self._muted
-
     def set_value(self, value, fire=False):
         v = max(0, min(100, int(value)))
         if v == self._value:

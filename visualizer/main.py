@@ -9,12 +9,15 @@ CLI:
     python main.py --device-name "Speakers"     # pick by name substring
     python main.py --width 1920 --height 1080
     python main.py --fullscreen
+    python main.py --file song.mp3 --render out.mp4 --width 1920 --height 1080
+                                                # offline-render to a video file
 """
 from __future__ import annotations
 
 import argparse
 import math
 import os
+import subprocess
 import sys
 import time
 
@@ -147,7 +150,183 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--rotation", type=float, default=90.0,
                     help="Initial waveform rotation in degrees (default 90). "
                          "Adjust at runtime with [ and ] keys, R resets.")
+    p.add_argument("--render", type=str, default=None, metavar="OUTPUT",
+                    help="Offline-render the visualizer for --file into this "
+                         "video file (e.g. out.mp4) instead of opening a "
+                         "window, then exit. Requires --file. The original "
+                         "audio is muxed into the result. Use --width/--height "
+                         "for resolution and --fps for frame rate.")
+    p.add_argument("--fps", type=int, default=60,
+                    help="Frame rate of the --render output video (default 60). "
+                         "Ignored outside render mode.")
     return p.parse_args()
+
+
+def render_video(args) -> int:
+    """Offline-render the visualizer for an audio file to a video file.
+
+    Decodes the whole file, then steps the visualizer frame-by-frame at a
+    fixed fps, drawing each frame into an offscreen framebuffer and piping
+    the raw RGB pixels to an ffmpeg encoder that muxes them with the
+    original audio. Unlike the live window this is deterministic and runs
+    as fast as the GPU + encoder allow — there's no realtime pacing.
+
+    Returns a process exit code (0 = success)."""
+    import numpy as np
+    from audio import OfflineAudioAnalyzer
+
+    if not args.file:
+        print("[render] --render requires --file (the audio track to render).",
+              file=sys.stderr)
+        return 2
+
+    fps  = max(1, int(args.fps))
+    w, h = args.width, args.height
+
+    # Deterministic shake/particle RNG so re-rendering the same file with
+    # the same settings yields an identical video.
+    np.random.seed(0)
+
+    # ── Decode audio up front ────────────────────────────────────────────
+    analyzer = OfflineAudioAnalyzer(
+        file_path     = args.file,
+        fps           = fps,
+        ffmpeg_path   = args.ffmpeg_path,
+        start_seconds = args.start,
+    )
+    try:
+        analyzer.start()
+    except Exception as e:
+        print(f"[render] {e}", file=sys.stderr)
+        return 1
+    if analyzer.total_frames <= 0:
+        print("[render] decoded 0 frames of audio — nothing to render.",
+              file=sys.stderr)
+        return 1
+
+    # ── Headless GL context ──────────────────────────────────────────────
+    # A hidden GLFW window just to own the OpenGL context; we never draw to
+    # it (the composite pass targets our offscreen FBO), so its size is
+    # irrelevant. MSAA is left off — the scene is composited from a
+    # single-sample texture via a fullscreen quad, so it gains nothing here
+    # and would only complicate the framebuffer read-back.
+    if not glfw.init():
+        print("[render] GLFW init failed", file=sys.stderr)
+        return 1
+    glfw.window_hint(glfw.CONTEXT_VERSION_MAJOR, 3)
+    glfw.window_hint(glfw.CONTEXT_VERSION_MINOR, 3)
+    glfw.window_hint(glfw.OPENGL_PROFILE, glfw.OPENGL_CORE_PROFILE)
+    glfw.window_hint(glfw.OPENGL_FORWARD_COMPAT, glfw.TRUE)
+    glfw.window_hint(glfw.VISIBLE, glfw.FALSE)
+    window = glfw.create_window(64, 64, "viz-render", None, None)
+    if not window:
+        glfw.terminate()
+        print("[render] failed to create GL context", file=sys.stderr)
+        return 1
+    glfw.make_context_current(window)
+
+    ctx = moderngl.create_context()
+    renderer = Renderer(ctx, w, h)
+
+    # Offscreen target the composite pass writes into, then we read back.
+    target_tex = ctx.texture((w, h), 4, dtype="f1")
+    target_fbo = ctx.framebuffer(color_attachments=[target_tex])
+
+    settings = Settings()
+    settings.show_help = False    # never burn the shortcuts overlay into a render
+    viz = Visualizer(
+        analyzer, renderer,
+        initial_rotation = math.radians(args.rotation),
+        settings         = settings,
+    )
+
+    # ── Encoder ──────────────────────────────────────────────────────────
+    # Video frames arrive as raw rgb24 on stdin; audio is read from the
+    # source file at the same offset we rendered from. OpenGL framebuffers
+    # are bottom-up, so vflip flips them to top-down for the video.
+    ffmpeg   = args.ffmpeg_path or "ffmpeg"
+    out_path = args.render
+    enc_cmd = [
+        ffmpeg, "-y",
+        "-loglevel", "error",
+        "-f", "rawvideo", "-pixel_format", "rgb24",
+        "-video_size", f"{w}x{h}", "-framerate", str(fps),
+        "-i", "-",
+        "-ss", f"{args.start:.3f}", "-i", args.file,
+        "-vf", "vflip",
+        "-c:v", "libx264", "-pix_fmt", "yuv420p",
+        "-crf", "18", "-preset", "medium",
+        "-c:a", "aac", "-b:a", "192k",
+        "-map", "0:v:0", "-map", "1:a:0?",
+        "-shortest",
+        out_path,
+    ]
+    try:
+        # stdout/stderr are explicitly redirected, not inherited. Inheriting
+        # the parent's std handles makes Windows try to duplicate them, which
+        # fails with WinError 50 when those handles are pipes or None — e.g.
+        # when Drop (a --windowed app) launches us. ffmpeg writes only to
+        # stderr, so we capture that and surface it if the encode fails.
+        enc = subprocess.Popen(
+            enc_cmd,
+            stdin  = subprocess.PIPE,
+            stdout = subprocess.DEVNULL,
+            stderr = subprocess.PIPE,
+        )
+    except FileNotFoundError:
+        print(f"[render] ffmpeg not found at {ffmpeg!r}.", file=sys.stderr)
+        glfw.terminate()
+        return 1
+
+    aspect = w / max(h, 1)
+    dt     = 1.0 / fps
+    total  = analyzer.total_frames
+    print(f"[render] {total} frames @ {fps}fps, {w}x{h} -> {out_path}",
+          file=sys.stderr)
+
+    aborted = False
+    enc_err = b""
+    try:
+        for frame in range(total):
+            viz.update(dt)
+            viz.render(aspect, target=target_fbo)
+            try:
+                enc.stdin.write(target_fbo.read(components=3, dtype="f1"))
+            except (BrokenPipeError, OSError):
+                print("\n[render] encoder closed early — aborting.",
+                      file=sys.stderr)
+                aborted = True
+                break
+            if frame % fps == 0 or frame == total - 1:
+                pct = (frame + 1) * 100 // total
+                sys.stderr.write(f"\r[render] frame {frame + 1}/{total} ({pct}%)  ")
+                sys.stderr.flush()
+    finally:
+        sys.stderr.write("\n")
+        if enc.stdin:
+            try: enc.stdin.close()
+            except Exception: pass
+        # Drain ffmpeg's stderr (only written on error at -loglevel error)
+        # after closing stdin so we never block the frame loop on it.
+        if enc.stderr:
+            try: enc_err = enc.stderr.read()
+            except Exception: pass
+        enc.wait()
+        analyzer.stop()
+        try:
+            target_fbo.release()
+            target_tex.release()
+        except Exception:
+            pass
+        glfw.terminate()
+
+    if aborted or enc.returncode not in (0, None):
+        detail = enc_err.decode("utf-8", "replace").strip()
+        print(f"[render] ffmpeg exited with code {enc.returncode}."
+              + (f"\n{detail}" if detail else ""), file=sys.stderr)
+        return 1
+    print(f"[render] done: {out_path}", file=sys.stderr)
+    return 0
 
 
 def main() -> int:
@@ -155,6 +334,9 @@ def main() -> int:
     if args.list_devices:
         list_devices()
         return 0
+    if args.render:
+        # Offline video render — headless, no window, exits when done.
+        return render_video(args)
 
     # ── GLFW ───────────────────────────────────────────────────────────────
     if not glfw.init():
