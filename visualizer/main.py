@@ -99,6 +99,46 @@ TOGGLE_KEYS = [
     ("KEY_7", "bg_vignette", "BG vignette"),
 ]
 
+# Effects shown in the overlay's TOGGLES section, in order. (Settings attr,
+# overlay label). Also defines the names accepted by --effects when a render
+# is spawned with the live toggle state.
+HELP_TOGGLE_ROWS = [
+    ("bloom",       "Bloom"),
+    ("shake",       "Camera shake"),
+    ("particles",   "Particles"),
+    ("chromatic",   "Chromatic aberration"),
+    ("bg_drift",    "Background drift"),
+    ("bg_twinkle",  "Star twinkle"),
+    ("bg_vignette", "Vignette"),
+]
+
+# Quality steps for the in-window render sliders. Resolutions are
+# (width, height, label); fps is a plain list. The slider keys (-/= and ,/.)
+# move between these stops, and the chosen pair becomes the spawned render's
+# --width/--height/--fps.
+RENDER_RESOLUTIONS = [
+    (1280, 720,  "720p"),
+    (1920, 1080, "1080p"),
+    (2560, 1440, "1440p"),
+    (3840, 2160, "2160p"),
+]
+RENDER_FPS = [24, 30, 60]
+
+
+def _render_output_path(file_path: str, res_label: str, fps: int) -> str:
+    """Pick an output path next to the source audio, e.g.
+    song.mp3 -> song_viz_1080p60.mp4, bumping a counter if it already exists
+    so a second render doesn't clobber the first."""
+    folder = os.path.dirname(os.path.abspath(file_path))
+    stem   = os.path.splitext(os.path.basename(file_path))[0]
+    base   = f"{stem}_viz_{res_label}{fps}"
+    cand   = os.path.join(folder, base + ".mp4")
+    n = 2
+    while os.path.exists(cand):
+        cand = os.path.join(folder, f"{base}_{n}.mp4")
+        n += 1
+    return cand
+
 
 def print_help(settings: Settings) -> None:
     """Print the controls + current toggle state to the console."""
@@ -110,6 +150,9 @@ def print_help(settings: Settings) -> None:
     print("  [ / ]      Rotate \u00B115\u00B0")
     print("  R          Reset rotation")
     print("  H          Toggle on-screen shortcuts overlay")
+    print("  Enter      Render the current song to a video (file mode)")
+    print("  - / =      Render resolution down / up")
+    print("  , / .      Render fps down / up")
     print()
     print("  Effect toggles (current state shown):")
     for i, (_key, attr, label) in enumerate(TOGGLE_KEYS, start=1):
@@ -159,6 +202,13 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--fps", type=int, default=60,
                     help="Frame rate of the --render output video (default 60). "
                          "Ignored outside render mode.")
+    p.add_argument("--effects", type=str, default=None,
+                    help="(render mode) Comma-separated effects to ENABLE; any "
+                         "not listed are disabled. Names: bloom, shake, "
+                         "particles, chromatic, bg_drift, bg_twinkle, "
+                         "bg_vignette. Used internally when the in-window "
+                         "render shortcut spawns a render with the current "
+                         "toggle state.")
     return p.parse_args()
 
 
@@ -234,6 +284,12 @@ def render_video(args) -> int:
 
     settings = Settings()
     settings.show_help = False    # never burn the shortcuts overlay into a render
+    if args.effects is not None:
+        # Honor the live toggle state passed by the in-window render shortcut:
+        # enable exactly the listed effects, disable the rest.
+        enabled = {e.strip() for e in args.effects.split(",") if e.strip()}
+        for attr, _ in HELP_TOGGLE_ROWS:
+            setattr(settings, attr, attr in enabled)
     viz = Visualizer(
         analyzer, renderer,
         initial_rotation = math.radians(args.rotation),
@@ -411,10 +467,98 @@ def main() -> int:
 
     print_help(settings)
 
+    # ── In-window render state ───────────────────────────────────────────
+    # quality holds the slider positions; render holds the spawned render
+    # subprocess + a short status string shown in the overlay. help_dirty
+    # marks the overlay texture for a rebuild on the next frame (set only on
+    # a keypress / render event, so we never rebuild per frame).
+    quality    = {"res_index": 1, "fps_index": len(RENDER_FPS) - 1}
+    render     = {"proc": None, "status": "", "out": ""}
+    help_dirty = {"v": True}
+
+    def refresh_help() -> None:
+        """Push the current toggle / quality / status state into the overlay."""
+        toggles = [(label, bool(getattr(settings, attr)))
+                   for attr, label in HELP_TOGGLE_ROWS]
+        _, _, rlabel = RENDER_RESOLUTIONS[quality["res_index"]]
+        renderer.rebuild_help_texture(
+            toggles   = toggles,
+            res_label = rlabel,
+            res_index = quality["res_index"],
+            res_n     = len(RENDER_RESOLUTIONS),
+            fps       = RENDER_FPS[quality["fps_index"]],
+            fps_index = quality["fps_index"],
+            fps_n     = len(RENDER_FPS),
+            status    = render["status"],
+        )
+
+    def trigger_render() -> None:
+        """Spawn a background render of the current file at the selected
+        quality with the currently-enabled effects. Reuses this program's
+        own --render path in a separate process so the live window stays
+        responsive — and a crash in the render can't take the window down."""
+        if not args.file:
+            render["status"] = "Render needs a file (run with --file)"
+            help_dirty["v"] = True
+            return
+        proc = render["proc"]
+        if proc is not None and proc.poll() is None:
+            render["status"] = "Already rendering..."
+            help_dirty["v"] = True
+            return
+
+        rw, rh, rlabel = RENDER_RESOLUTIONS[quality["res_index"]]
+        fps = RENDER_FPS[quality["fps_index"]]
+        out = _render_output_path(args.file, rlabel, fps)
+        effects = ",".join(attr for attr, _ in HELP_TOGGLE_ROWS
+                           if getattr(settings, attr))
+
+        # Re-invoke ourselves in --render mode. Frozen: sys.executable IS this
+        # visualizer binary. Dev: run this main.py with the interpreter.
+        if getattr(sys, "frozen", False):
+            cmd = [sys.executable]
+        else:
+            cmd = [sys.executable, "-u", os.path.abspath(__file__)]
+        cmd += [
+            "--file",     args.file,
+            "--render",   out,
+            "--width",    str(rw), "--height", str(rh),
+            "--fps",      str(fps),
+            "--rotation", f"{math.degrees(viz.rotation):.3f}",
+            "--effects",  effects,
+        ]
+        if args.ffmpeg_path:
+            cmd += ["--ffmpeg-path", args.ffmpeg_path]
+
+        kwargs = {}
+        if sys.platform == "win32":
+            kwargs["creationflags"] = subprocess.CREATE_NO_WINDOW
+        if getattr(sys, "frozen", False):
+            # onefile-within-onefile: strip the bootloader's vars so the child
+            # PyInstaller binary unpacks itself into its own temp dir cleanly.
+            env = os.environ.copy()
+            for k in list(env):
+                if k.startswith("_PYI") or k == "_MEIPASS2":
+                    env.pop(k, None)
+            kwargs["env"] = env
+
+        try:
+            render["proc"]   = subprocess.Popen(cmd, **kwargs)
+            render["out"]    = out
+            render["status"] = f"Rendering {os.path.basename(out)} ..."
+            print(f"[render] spawned -> {out}", file=sys.stderr)
+        except Exception as e:
+            render["status"] = "Render failed to start"
+            print(f"[render] launch failed: {e}", file=sys.stderr)
+        help_dirty["v"] = True
+
+    # Build the overlay once with the real initial state.
+    refresh_help()
+
     # Key callback — bound here (after viz/settings exist) so the handler
     # can close over them. ROT_STEP for [ ] rotation, R resets to the
-    # --rotation value, ESC quits, H reprints help, digit keys toggle
-    # effects per TOGGLE_KEYS.
+    # --rotation value, ESC quits, H toggles the overlay, digit keys toggle
+    # effects, Enter renders, and -/= , /. drive the quality sliders.
     ROT_STEP = math.radians(15.0)
 
     def on_key(_w, key, _scan, action, _mods):
@@ -435,11 +579,33 @@ def main() -> int:
         if key == glfw.KEY_H:
             settings.show_help = not settings.show_help
             return
+        if key in (glfw.KEY_ENTER, glfw.KEY_KP_ENTER):
+            trigger_render()
+            return
+        if key == glfw.KEY_MINUS:
+            quality["res_index"] = max(0, quality["res_index"] - 1)
+            help_dirty["v"] = True
+            return
+        if key == glfw.KEY_EQUAL:
+            quality["res_index"] = min(len(RENDER_RESOLUTIONS) - 1,
+                                       quality["res_index"] + 1)
+            help_dirty["v"] = True
+            return
+        if key == glfw.KEY_COMMA:
+            quality["fps_index"] = max(0, quality["fps_index"] - 1)
+            help_dirty["v"] = True
+            return
+        if key == glfw.KEY_PERIOD:
+            quality["fps_index"] = min(len(RENDER_FPS) - 1,
+                                       quality["fps_index"] + 1)
+            help_dirty["v"] = True
+            return
         for kc, attr, label in toggle_table:
             if key == kc:
                 new = not getattr(settings, attr)
                 setattr(settings, attr, new)
                 print(f"[toggle] {label}: {'ON' if new else 'OFF'}")
+                help_dirty["v"] = True   # refresh the overlay's [ON]/[OFF]
                 return
 
     glfw.set_key_callback(window, on_key)
@@ -457,6 +623,22 @@ def main() -> int:
         fb_w, fb_h = glfw.get_framebuffer_size(window)
         if (fb_w, fb_h) != (renderer.width, renderer.height):
             renderer.resize(fb_w, fb_h)
+
+        # Reap a finished render and surface its result in the overlay.
+        proc = render["proc"]
+        if proc is not None and proc.poll() is not None:
+            code = proc.returncode
+            render["proc"] = None
+            render["status"] = (f"Saved {os.path.basename(render['out'])}"
+                                if code == 0 else f"Render failed (code {code})")
+            help_dirty["v"] = True
+
+        # Rebuild the overlay texture if a keypress / render event changed
+        # what it shows. Done here (with a live GL context) rather than in the
+        # key callback so it happens at most once per frame.
+        if help_dirty["v"]:
+            refresh_help()
+            help_dirty["v"] = False
 
         aspect = fb_w / max(fb_h, 1)
         viz.update(dt)

@@ -59,6 +59,16 @@ the output) and needs **ffmpeg** (on PATH, or pass `--ffmpeg-path` — Drop
 bundles one). Each frame is drawn to an offscreen framebuffer and piped to
 ffmpeg, which encodes H.264 + AAC and trims to the shorter stream.
 
+### …or render straight from the live window
+
+While playing a file (`--file`), press **Enter** to render that song in the
+background — at the resolution/fps shown on the overlay's quality sliders,
+with exactly the effects you've toggled on. Adjust the sliders with `-`/`=`
+(resolution) and `,`/`.` (fps); press `H` to show the overlay. The output is
+saved next to the source audio (e.g. `song_viz_1080p60.mp4`) and the overlay
+shows a status line while it renders. The window stays responsive — the
+render runs as a separate process.
+
 ## System audio by OS
 
 The mic path "just works" everywhere. System audio (what's coming out of

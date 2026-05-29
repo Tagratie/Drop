@@ -55,6 +55,13 @@ Render to a video file (offline)
   [    ]              Rotate waveform -15 deg / +15 deg
   R                   Reset rotation to the --rotation value
   H                   Toggle the on-screen shortcuts overlay (default ON)
+  Enter               Render the current song to a video (file mode only).
+                      Uses the effects currently toggled on + the resolution
+                      and fps from the sliders below. Renders in a background
+                      process (the window stays responsive) and saves next to
+                      the source audio, e.g. song_viz_1080p60.mp4.
+  - / =               Render resolution slider down / up (720p/1080p/1440p/2160p)
+  , / .               Render fps slider down / up        (24/30/60)
 
   Effect toggles:
   1                   Bloom (glow post-pass)

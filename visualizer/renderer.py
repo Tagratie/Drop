@@ -174,11 +174,30 @@ class Renderer:
         self._build_fbos(width, height)
 
         # ── help overlay (built last so we have a fully-init ctx) ──────────
-        # PIL renders the shortcuts text into a static RGBA texture once.
-        # Each frame, render_help_overlay() recomputes the NDC quad corners
-        # from the current window size and uploads them — that's how the
-        # overlay stays pinned to a fixed pixel offset from the top-left
-        # even when the window is resized.
+        # PIL renders the shortcuts panel into an RGBA texture. The panel now
+        # reflects live state — per-effect ON/OFF, the render-quality sliders,
+        # and a render status line — so main() rebuilds it via
+        # rebuild_help_texture() whenever that state changes (cheap, only on a
+        # keypress / render event, never per frame). Each frame,
+        # render_help_overlay() just recomputes the NDC quad corners so the
+        # panel stays pinned to a fixed pixel offset from the top-left even
+        # when the window is resized.
+        #
+        # These defaults let the panel build correctly here at construction
+        # time, before main() has pushed the real state in.
+        self._help_toggles = [
+            ("Bloom", True), ("Camera shake", True), ("Particles", True),
+            ("Chromatic aberration", True), ("Background drift", True),
+            ("Star twinkle", False), ("Vignette", True),
+        ]
+        self._help_res_label = "1080p"
+        self._help_res_index = 1
+        self._help_res_n     = 4
+        self._help_fps       = 60
+        self._help_fps_index = 2
+        self._help_fps_n     = 3
+        self._help_status    = ""
+        self.help_texture = None
         self.help_texture, self.help_tex_size = self._build_help_texture()
         # 4 vertices × (2 pos + 2 uv) floats = 32 bytes. Dynamic — rewritten
         # each frame.
@@ -228,105 +247,205 @@ class Renderer:
         self.bloom_fbo_a = ctx.framebuffer(color_attachments=[self.bloom_tex_a])
         self.bloom_fbo_b = ctx.framebuffer(color_attachments=[self.bloom_tex_b])
 
-    def _build_help_texture(self) -> Tuple[moderngl.Texture, Tuple[int, int]]:
-        """Pre-render the keyboard-shortcuts overlay into an RGBA texture.
+    def rebuild_help_texture(self, *, toggles=None, res_label=None,
+                             res_index=None, res_n=None, fps=None,
+                             fps_index=None, fps_n=None, status=None) -> None:
+        """Rebuild the overlay texture from new state. Cheap enough to call on
+        any keypress that changes what the panel shows (effect toggles, the
+        quality sliders, the render status). Only the args you pass are
+        updated; the rest keep their current value. Releases the previous
+        texture so we don't leak GPU memory."""
+        if toggles   is not None: self._help_toggles   = toggles
+        if res_label is not None: self._help_res_label = res_label
+        if res_index is not None: self._help_res_index = res_index
+        if res_n     is not None: self._help_res_n     = res_n
+        if fps       is not None: self._help_fps       = fps
+        if fps_index is not None: self._help_fps_index = fps_index
+        if fps_n     is not None: self._help_fps_n     = fps_n
+        if status    is not None: self._help_status    = status
+        old = self.help_texture
+        self.help_texture, self.help_tex_size = self._build_help_texture()
+        if old is not None:
+            try: old.release()
+            except Exception: pass
 
-        Called once at init. Uses PIL to draw a rounded semi-transparent
-        panel + text glyphs at native pixel resolution; the result is
-        uploaded to a moderngl texture that we sample as a textured quad
-        each frame the overlay is visible.
+    def _build_help_texture(self) -> Tuple[moderngl.Texture, Tuple[int, int]]:
+        """Render the keyboard-shortcuts panel into an RGBA texture.
+
+        Draws three sections — shortcuts, effect toggles (with live ON/OFF),
+        and a RENDER section with two quality sliders (resolution + fps) and
+        an optional status line — all in the same fonts/palette as before.
+        Called at init and again by rebuild_help_texture() whenever the
+        displayed state changes.
+
+        Uses PIL to draw a rounded semi-transparent panel + glyphs + slider
+        bars at native pixel resolution; the result is uploaded to a moderngl
+        texture sampled as a textured quad each frame the overlay is visible.
 
         Returns (texture, (width, height)) so the render path knows the
         intrinsic pixel size to map into NDC."""
-        from PIL import Image, ImageDraw, ImageFont
+        from PIL import Image, ImageDraw
 
-        # Layout constants — picked to fit "Chromatic aberration" comfortably
-        # at body size while keeping the panel compact in the corner.
-        pad        = 14
-        line_h     = 18
-        title_pad  = 6   # extra space under the title
+        # Layout. line_h is the base row height; a slider row also reserves
+        # slider_h beneath its text line for the bar. label_x is where the
+        # label column starts (leaving room for the key column on the left).
+        pad       = 14
+        line_h    = 18
+        title_pad = 6
+        label_x   = pad + 80
+        slider_h  = 16
+        min_gap   = 16
 
         title_font = self._find_font(15, mono=False)
         body_font  = self._find_font(13, mono=True)
 
-        # (text, role) pairs. Empty strings render as blank-line spacers.
-        lines = [
-            ("KEYBOARD SHORTCUTS", "title"),
-            ("", "blank"),
-            ("ESC          Quit",                 "body"),
-            ("[   ]        Rotate \u00B115\u00B0", "body"),
-            ("R            Reset rotation",       "body"),
-            ("H            Hide this overlay",    "body"),
-            ("", "blank"),
-            ("TOGGLES",                           "header"),
-            ("1            Bloom",                "body"),
-            ("2            Camera shake",         "body"),
-            ("3            Particles",            "body"),
-            ("4            Chromatic aberration", "body"),
-            ("5            Background drift",     "body"),
-            ("6            Star twinkle",         "body"),
-            ("7            Vignette",             "body"),
+        # Palette — same greys/blue header as before; accent matches the
+        # waveform glow so the sliders / ON state read as "active".
+        col_title  = (255, 255, 255, 255)
+        col_header = (180, 190, 220, 255)
+        col_key    = (200, 205, 215, 255)
+        col_label  = (220, 220, 225, 255)
+        col_on     = (255, 150,  70, 255)
+        col_off    = (120, 125, 140, 255)
+        col_value  = (235, 235, 240, 255)
+        col_status = (150, 220, 160, 255)
+        track_col  = ( 70,  72,  84, 255)
+        fill_col   = (255, 130,  50, 255)
+        tick_col   = (110, 114, 130, 255)
+        handle_col = (240, 240, 245, 255)
+
+        # Ordered rows. First element of each tuple is its kind.
+        rows = [
+            ("title",  "KEYBOARD SHORTCUTS"),
+            ("blank",),
+            ("kv", "ESC",   "Quit"),
+            ("kv", "[   ]", "Rotate ±15°"),
+            ("kv", "R",     "Reset rotation"),
+            ("kv", "H",     "Hide this overlay"),
+            ("blank",),
+            ("header", "TOGGLES"),
         ]
+        for i, (label, on) in enumerate(self._help_toggles, start=1):
+            rows.append(("toggle", str(i), label, on))
+        rows += [
+            ("blank",),
+            ("header", "RENDER"),
+            ("kv", "Enter", "Render current song"),
+            ("slider", "- / =", "Resolution", self._help_res_label,
+             self._help_res_index, self._help_res_n),
+            ("slider", ", / .", "FPS", str(self._help_fps),
+             self._help_fps_index, self._help_fps_n),
+        ]
+        if self._help_status:
+            rows.append(("status", self._help_status))
 
-        # Measure the widest line so the panel auto-fits.
-        tmp_img  = Image.new("RGBA", (10, 10))
-        tmp_draw = ImageDraw.Draw(tmp_img)
-        max_w = 0
-        for text, role in lines:
-            if not text:
-                continue
-            font = title_font if role == "title" else body_font
+        tmp = ImageDraw.Draw(Image.new("RGBA", (10, 10)))
+
+        def tw(text, font):
             try:
-                bbox = tmp_draw.textbbox((0, 0), text, font=font)
-                w = bbox[2] - bbox[0]
+                b = tmp.textbbox((0, 0), text, font=font)
+                return b[2] - b[0]
             except Exception:
-                # Old PIL — fall back to textsize.
-                w, _ = tmp_draw.textsize(text, font=font)
-            max_w = max(max_w, w)
+                return tmp.textsize(text, font=font)[0]
 
-        width  = int(max_w + pad * 2)
-        height = int(pad * 2 + len(lines) * line_h + title_pad)
+        # ── measure: panel auto-fits its widest row ────────────────────────
+        content_w = 0
+        height = pad * 2
+        for r in rows:
+            kind = r[0]
+            if kind == "title":
+                content_w = max(content_w, tw(r[1], title_font))
+                height += line_h + title_pad
+            elif kind == "header":
+                content_w = max(content_w, tw(r[1], body_font))
+                height += line_h
+            elif kind == "kv":
+                content_w = max(content_w, (label_x - pad) + tw(r[2], body_font))
+                height += line_h
+            elif kind == "toggle":
+                state = "[ON]" if r[3] else "[OFF]"
+                content_w = max(content_w, (label_x - pad) + tw(r[2], body_font)
+                                + min_gap + tw(state, body_font))
+                height += line_h
+            elif kind == "slider":
+                content_w = max(content_w, (label_x - pad) + tw(r[2], body_font)
+                                + min_gap + tw(r[3], body_font))
+                height += line_h + slider_h
+            elif kind == "status":
+                content_w = max(content_w, tw(r[1], body_font))
+                height += line_h
+            else:  # blank
+                height += line_h
+
+        width  = max(int(content_w + pad * 2), label_x + 140 + pad)
+        height = int(height)
 
         img  = Image.new("RGBA", (width, height), (0, 0, 0, 0))
         draw = ImageDraw.Draw(img)
 
-        # Semi-transparent rounded panel as the background. Slightly darker
-        # alpha (190/255) so the text stays legible over any visualizer
-        # content — bright bass-pulse flashes don't wash it out.
+        # Semi-transparent rounded panel. Alpha 190/255 keeps text legible
+        # over bright bass-pulse flashes.
         try:
-            draw.rounded_rectangle(
-                [(0, 0), (width - 1, height - 1)],
-                radius=10,
-                fill=(10, 10, 14, 190),
-            )
+            draw.rounded_rectangle([(0, 0), (width - 1, height - 1)],
+                                   radius=10, fill=(10, 10, 14, 190))
         except AttributeError:
-            # Very old PIL without rounded_rectangle.
-            draw.rectangle(
-                [(0, 0), (width - 1, height - 1)],
-                fill=(10, 10, 14, 190),
-            )
+            draw.rectangle([(0, 0), (width - 1, height - 1)], fill=(10, 10, 14, 190))
+
+        right_x = width - pad
+
+        def right_text(y, text, font, fill):
+            draw.text((right_x - tw(text, font), y), text, font=font, fill=fill)
 
         y = pad
-        for text, role in lines:
-            if role == "title":
-                draw.text((pad, y), text, font=title_font, fill=(255, 255, 255, 255))
+        for r in rows:
+            kind = r[0]
+            if kind == "title":
+                draw.text((pad, y), r[1], font=title_font, fill=col_title)
                 y += line_h + title_pad
-            elif role == "header":
-                draw.text((pad, y), text, font=body_font, fill=(180, 190, 220, 255))
+            elif kind == "header":
+                draw.text((pad, y), r[1], font=body_font, fill=col_header)
                 y += line_h
-            elif role == "body":
-                draw.text((pad, y), text, font=body_font, fill=(220, 220, 225, 255))
+            elif kind == "kv":
+                draw.text((pad,     y), r[1], font=body_font, fill=col_key)
+                draw.text((label_x, y), r[2], font=body_font, fill=col_label)
+                y += line_h
+            elif kind == "toggle":
+                _, keytext, label, on = r
+                draw.text((pad,     y), keytext, font=body_font, fill=col_key)
+                draw.text((label_x, y), label,   font=body_font, fill=col_label)
+                right_text(y, "[ON]" if on else "[OFF]", body_font,
+                           col_on if on else col_off)
+                y += line_h
+            elif kind == "slider":
+                _, keytext, label, value, index, n = r
+                draw.text((pad,     y), keytext, font=body_font, fill=col_key)
+                draw.text((label_x, y), label,   font=body_font, fill=col_label)
+                right_text(y, value, body_font, col_value)
+                y += line_h
+                # The bar spans the label column to the panel's right margin.
+                bx0, bx1 = label_x, right_x
+                by = y + slider_h // 2 - 1
+                frac = 0.0 if n <= 1 else index / float(n - 1)
+                hx = int(bx0 + frac * (bx1 - bx0))
+                draw.line([(bx0, by), (bx1, by)], fill=track_col, width=4)
+                draw.line([(bx0, by), (hx,  by)], fill=fill_col,  width=4)
+                for s in range(n):
+                    sx = int(bx0 + (0 if n <= 1 else s / float(n - 1)) * (bx1 - bx0))
+                    draw.line([(sx, by - 4), (sx, by + 4)], fill=tick_col, width=1)
+                draw.ellipse([(hx - 5, by - 5), (hx + 5, by + 5)], fill=handle_col)
+                y += slider_h
+            elif kind == "status":
+                draw.text((pad, y), r[1], font=body_font, fill=col_status)
                 y += line_h
             else:  # blank
                 y += line_h
 
-        # PIL renders top-down; OpenGL UVs go bottom-up. We don't flip
-        # the bytes here — instead, the per-frame UVs in render_help_overlay()
-        # use V=0 at the top edge, V=1 at the bottom, achieving the flip.
+        # PIL renders top-down; OpenGL UVs go bottom-up. We don't flip the
+        # bytes here — render_help_overlay()'s per-frame UVs use V=0 at the
+        # top edge, V=1 at the bottom, achieving the flip.
         raw = img.tobytes()
         tex = self.ctx.texture((width, height), 4, raw)
         tex.filter = (moderngl.LINEAR, moderngl.LINEAR)
-        # Build mipmaps for a slightly nicer look at any DPI.
         try:
             tex.build_mipmaps()
             tex.filter = (moderngl.LINEAR_MIPMAP_LINEAR, moderngl.LINEAR)
